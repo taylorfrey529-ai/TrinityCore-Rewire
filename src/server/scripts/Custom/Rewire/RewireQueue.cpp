@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iterator>
 #include <system_error>
 #include <utility>
 
@@ -241,12 +242,8 @@ bool PersistentQueue::RewriteSpoolLocked(std::size_t acknowledgedCount, std::str
         return false;
     }
 
+    filesystemError.clear();
     std::filesystem::remove(backupPath, filesystemError);
-    if (filesystemError)
-    {
-        error = "REWIRE spool replaced but backup cleanup failed: " + filesystemError.message();
-        return false;
-    }
 
     error.clear();
     return true;
