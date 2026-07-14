@@ -37,7 +37,8 @@ public:
 
 private:
     bool FlushLocked(std::string& error);
-    bool RewriteSpoolLocked(std::string& error);
+    bool RewriteSpoolLocked(std::size_t acknowledgedCount, std::string& error);
+    bool RecoverInterruptedRewriteLocked(std::string& error);
 
     std::filesystem::path _spoolPath;
     std::size_t _capacity;
