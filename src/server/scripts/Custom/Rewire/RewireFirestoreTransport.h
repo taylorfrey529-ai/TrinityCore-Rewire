@@ -13,6 +13,7 @@
 #include "RewireConfig.h"
 #include "RewireQueue.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -39,14 +40,18 @@ public:
 private:
     void Run();
     bool DeliverBatch(std::string& error);
-    bool SendCommit(std::string const& body, std::string& error) const;
-    std::string ReadAccessToken(std::string& error) const;
+    bool SendCommit(std::string const& body, std::string& error);
+    std::string ReadAccessToken(std::string& error);
+    std::string ReadMetadataAccessToken(std::uint32_t& expiresInSeconds, std::string& error) const;
 
     RewireConfig _config;
     PersistentQueue& _queue;
     std::thread _worker;
     std::mutex _mutex;
     std::condition_variable _condition;
+    std::mutex _tokenMutex;
+    std::string _cachedAccessToken;
+    std::chrono::steady_clock::time_point _accessTokenExpiry;
     bool _running = false;
     bool _wakeRequested = false;
     std::uint32_t _retryDelayMs = 0;
