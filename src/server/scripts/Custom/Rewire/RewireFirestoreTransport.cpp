@@ -13,6 +13,8 @@
 
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -27,6 +29,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -186,9 +190,24 @@ bool FirestoreTransport::DeliverBatch(std::string& error)
         return true;
     }
 
-    std::string const body = BuildCommitBody(batch);
-    if (!SendCommit(body, error))
+    unsigned status = 0;
+    std::string responseBody;
+    DeliveryResult const result = SendCommit(BuildCommitBody(batch), status, responseBody, error);
+    if (result == DeliveryResult::RetryableFailure)
         return false;
+
+    if (result == DeliveryResult::PermanentFailure)
+    {
+        if (!WriteDeadLetter(batch, status, responseBody, error))
+            return false;
+
+        if (!_queue.Acknowledge(batch.size(), error))
+            return false;
+
+        TC_LOG_ERROR("server.rewire", "Moved {} permanently rejected Firestore write(s) to dead-letter storage after HTTP {}",
+            batch.size(), status);
+        return true;
+    }
 
     if (!_queue.Acknowledge(batch.size(), error))
         return false;
@@ -197,11 +216,12 @@ bool FirestoreTransport::DeliverBatch(std::string& error)
     return true;
 }
 
-bool FirestoreTransport::SendCommit(std::string const& body, std::string& error)
+FirestoreTransport::DeliveryResult FirestoreTransport::SendCommit(std::string const& body, unsigned& status,
+    std::string& responseBody, std::string& error)
 {
     std::string const token = ReadAccessToken(error);
     if (token.empty())
-        return false;
+        return DeliveryResult::RetryableFailure;
 
     namespace asio = boost::asio;
     namespace beast = boost::beast;
@@ -221,7 +241,7 @@ bool FirestoreTransport::SendCommit(std::string const& body, std::string& error)
         if (!SSL_set_tlsext_host_name(stream.native_handle(), _config.Transport.FirestoreHost.c_str()))
         {
             error = "unable to configure TLS SNI for Firestore";
-            return false;
+            return DeliveryResult::RetryableFailure;
         }
 
         auto const endpoints = resolver.resolve(_config.Transport.FirestoreHost, _config.Transport.FirestorePort);
@@ -252,7 +272,9 @@ bool FirestoreTransport::SendCommit(std::string const& body, std::string& error)
         if (shutdownError == asio::error::eof || shutdownError == asio::ssl::error::stream_truncated)
             shutdownError.clear();
 
-        unsigned const status = response.result_int();
+        status = response.result_int();
+        responseBody = response.body();
+
         if (status == 401)
         {
             std::lock_guard tokenLock(_tokenMutex);
@@ -260,24 +282,81 @@ bool FirestoreTransport::SendCommit(std::string const& body, std::string& error)
             _accessTokenExpiry = {};
         }
 
-        if (status < 200 || status >= 300)
+        if (status >= 200 && status < 300)
         {
-            std::ostringstream message;
-            message << "Firestore commit returned HTTP " << status;
-            if (!response.body().empty())
-                message << ": " << response.body();
-            error = message.str();
-            return false;
+            error.clear();
+            return DeliveryResult::Success;
         }
 
-        error.clear();
-        return true;
+        std::ostringstream message;
+        message << "Firestore commit returned HTTP " << status;
+        if (!responseBody.empty())
+            message << ": " << responseBody;
+        error = message.str();
+
+        if (status == 408 || status == 425 || status == 429 || status >= 500 || status == 401)
+            return DeliveryResult::RetryableFailure;
+
+        if (status >= 400 && status < 500)
+            return DeliveryResult::PermanentFailure;
+
+        return DeliveryResult::RetryableFailure;
     }
     catch (std::exception const& exception)
     {
         error = std::string("Firestore HTTPS request failed: ") + exception.what();
+        return DeliveryResult::RetryableFailure;
+    }
+}
+
+bool FirestoreTransport::WriteDeadLetter(std::vector<std::string> const& batch, unsigned status,
+    std::string const& responseBody, std::string& error) const
+{
+    std::error_code filesystemError;
+    if (std::filesystem::path const parent = _config.Transport.DeadLetterPath.parent_path(); !parent.empty())
+        std::filesystem::create_directories(parent, filesystemError);
+
+    if (filesystemError)
+    {
+        error = "unable to create REWIRE dead-letter directory: " + filesystemError.message();
         return false;
     }
+
+    std::ofstream stream(_config.Transport.DeadLetterPath, std::ios::app);
+    if (!stream)
+    {
+        error = "unable to open REWIRE dead-letter file: " + _config.Transport.DeadLetterPath.generic_string();
+        return false;
+    }
+
+    for (std::string const& payload : batch)
+    {
+        rapidjson::StringBuffer buffer;
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        writer.StartObject();
+        writer.Key("timestampMs");
+        writer.Uint64(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()));
+        writer.Key("httpStatus");
+        writer.Uint(status);
+        writer.Key("responseBody");
+        writer.String(responseBody.c_str(), static_cast<rapidjson::SizeType>(responseBody.size()));
+        writer.Key("payload");
+        writer.String(payload.c_str(), static_cast<rapidjson::SizeType>(payload.size()));
+        writer.EndObject();
+        stream.write(buffer.GetString(), static_cast<std::streamsize>(buffer.GetSize()));
+        stream.put('\n');
+    }
+
+    stream.flush();
+    if (!stream)
+    {
+        error = "failed while writing REWIRE dead-letter file: " + _config.Transport.DeadLetterPath.generic_string();
+        return false;
+    }
+
+    error.clear();
+    return true;
 }
 
 std::string FirestoreTransport::ReadAccessToken(std::string& error)
