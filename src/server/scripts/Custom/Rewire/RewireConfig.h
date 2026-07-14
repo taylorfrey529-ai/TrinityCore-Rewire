@@ -57,6 +57,7 @@ struct TransportConfig
     std::string AccessTokenEnvironment = "REWIRE_FIREBASE_ACCESS_TOKEN";
     std::string MetadataHost = "metadata.google.internal";
     std::string MetadataPort = "80";
+    std::filesystem::path DeadLetterPath = "rewire-spool/dead-letter.ndjson";
 };
 
 struct RewireConfig
