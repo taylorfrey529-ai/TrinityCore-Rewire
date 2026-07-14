@@ -141,8 +141,6 @@ public:
         writer.StartObject();
         writer.Key("guid");
         writer.Uint64(player.GetGUID().GetCounter());
-        writer.Key("name");
-        writer.String(player.GetName().c_str());
         writer.Key("level");
         writer.Uint(player.GetLevel());
         writer.Key("mapId");
