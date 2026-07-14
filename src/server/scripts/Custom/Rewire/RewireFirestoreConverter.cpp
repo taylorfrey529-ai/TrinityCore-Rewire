@@ -119,18 +119,19 @@ bool FirestoreConverter::Convert(std::string_view sourceEvent, RewireConfig cons
     std::uint64_t guid = 0;
     std::uint64_t level = 0;
     std::uint64_t mapId = 0;
-    std::string playerName;
     if (!ReadRequiredUint64(player->value, "guid", guid, error) ||
-        !ReadRequiredString(player->value, "name", playerName, error) ||
         !ReadRequiredUint64(player->value, "level", level, error) ||
         !ReadRequiredUint64(player->value, "mapId", mapId, error))
         return false;
+
+    std::uint64_t const shardId = guid % shardCount;
+    std::string const eventId = nodeId + ":" + std::to_string(guid) + ":" + eventName + ":" + std::to_string(timestampMs);
 
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
 
     writer.StartObject();
-    writer.Key("document");
+    writer.Key("update");
     writer.StartObject();
     writer.Key("name");
     std::string const documentName = "projects/" + config.Firebase.ProjectId + "/databases/" +
@@ -143,29 +144,26 @@ bool FirestoreConverter::Convert(std::string_view sourceEvent, RewireConfig cons
     WriteStringValue(writer, schema.c_str());
     writer.Key("targetSchema");
     WriteStringValue(writer, targetSchema.c_str());
+    writer.Key("eventId");
+    WriteStringValue(writer, eventId.c_str());
     writer.Key("nodeId");
     WriteStringValue(writer, nodeId.c_str());
     writer.Key("event");
     WriteStringValue(writer, eventName.c_str());
     writer.Key("shardCount");
     WriteIntegerValue(writer, shardCount);
+    writer.Key("shardId");
+    WriteIntegerValue(writer, shardId);
     writer.Key("timestampMs");
     WriteIntegerValue(writer, timestampMs);
     writer.Key("playerGuid");
     WriteIntegerValue(writer, guid);
-    writer.Key("playerName");
-    WriteStringValue(writer, playerName.c_str());
     writer.Key("playerLevel");
     WriteIntegerValue(writer, level);
     writer.Key("mapId");
     WriteIntegerValue(writer, mapId);
 
     writer.EndObject();
-    writer.EndObject();
-    writer.Key("currentDocument");
-    writer.StartObject();
-    writer.Key("exists");
-    writer.Bool(false);
     writer.EndObject();
     writer.EndObject();
 
