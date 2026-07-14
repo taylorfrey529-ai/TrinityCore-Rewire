@@ -35,6 +35,9 @@ bool PersistentQueue::Initialize(std::string& error)
         return false;
     }
 
+    if (!RecoverInterruptedRewriteLocked(error))
+        return false;
+
     _durable.clear();
     _buffered.clear();
 
@@ -114,10 +117,20 @@ bool PersistentQueue::Acknowledge(std::size_t count, std::string& error)
         return false;
     }
 
+    if (count == 0)
+    {
+        error.clear();
+        return true;
+    }
+
+    if (!RewriteSpoolLocked(count, error))
+        return false;
+
     for (std::size_t index = 0; index < count; ++index)
         _durable.pop_front();
 
-    return RewriteSpoolLocked(error);
+    error.clear();
+    return true;
 }
 
 std::size_t PersistentQueue::Pending() const
@@ -167,9 +180,10 @@ bool PersistentQueue::FlushLocked(std::string& error)
     return true;
 }
 
-bool PersistentQueue::RewriteSpoolLocked(std::string& error)
+bool PersistentQueue::RewriteSpoolLocked(std::size_t acknowledgedCount, std::string& error)
 {
     std::filesystem::path const temporaryPath = _spoolPath.string() + ".tmp";
+    std::filesystem::path const backupPath = _spoolPath.string() + ".bak";
 
     {
         std::ofstream stream(temporaryPath, std::ios::trunc);
@@ -179,8 +193,10 @@ bool PersistentQueue::RewriteSpoolLocked(std::string& error)
             return false;
         }
 
-        for (std::string const& payload : _durable)
-            stream << payload << '\n';
+        auto itr = _durable.begin();
+        std::advance(itr, static_cast<std::ptrdiff_t>(acknowledgedCount));
+        for (; itr != _durable.end(); ++itr)
+            stream << *itr << '\n';
 
         stream.flush();
         if (!stream)
@@ -191,18 +207,95 @@ bool PersistentQueue::RewriteSpoolLocked(std::string& error)
     }
 
     std::error_code filesystemError;
+    std::filesystem::remove(backupPath, filesystemError);
+    filesystemError.clear();
+
+    if (std::filesystem::exists(_spoolPath, filesystemError) && !filesystemError)
+    {
+        std::filesystem::rename(_spoolPath, backupPath, filesystemError);
+        if (filesystemError)
+        {
+            std::filesystem::remove(temporaryPath);
+            error = "unable to stage REWIRE spool backup: " + filesystemError.message();
+            return false;
+        }
+    }
+    else if (filesystemError)
+    {
+        std::filesystem::remove(temporaryPath);
+        error = "unable to inspect REWIRE spool file: " + filesystemError.message();
+        return false;
+    }
+
     std::filesystem::rename(temporaryPath, _spoolPath, filesystemError);
     if (filesystemError)
     {
-        std::filesystem::remove(_spoolPath, filesystemError);
-        filesystemError.clear();
-        std::filesystem::rename(temporaryPath, _spoolPath, filesystemError);
-    }
+        std::error_code restoreError;
+        if (std::filesystem::exists(backupPath, restoreError) && !restoreError)
+            std::filesystem::rename(backupPath, _spoolPath, restoreError);
 
-    if (filesystemError)
-    {
         std::filesystem::remove(temporaryPath);
         error = "unable to replace REWIRE spool file: " + filesystemError.message();
+        if (restoreError)
+            error += "; backup restore also failed: " + restoreError.message();
+        return false;
+    }
+
+    std::filesystem::remove(backupPath, filesystemError);
+    if (filesystemError)
+    {
+        error = "REWIRE spool replaced but backup cleanup failed: " + filesystemError.message();
+        return false;
+    }
+
+    error.clear();
+    return true;
+}
+
+bool PersistentQueue::RecoverInterruptedRewriteLocked(std::string& error)
+{
+    std::filesystem::path const temporaryPath = _spoolPath.string() + ".tmp";
+    std::filesystem::path const backupPath = _spoolPath.string() + ".bak";
+
+    std::error_code filesystemError;
+    bool const spoolExists = std::filesystem::exists(_spoolPath, filesystemError);
+    if (filesystemError)
+    {
+        error = "unable to inspect REWIRE spool file: " + filesystemError.message();
+        return false;
+    }
+
+    bool const backupExists = std::filesystem::exists(backupPath, filesystemError);
+    if (filesystemError)
+    {
+        error = "unable to inspect REWIRE spool backup: " + filesystemError.message();
+        return false;
+    }
+
+    if (!spoolExists && backupExists)
+    {
+        std::filesystem::rename(backupPath, _spoolPath, filesystemError);
+        if (filesystemError)
+        {
+            error = "unable to restore REWIRE spool backup: " + filesystemError.message();
+            return false;
+        }
+    }
+    else if (spoolExists && backupExists)
+    {
+        std::filesystem::remove(backupPath, filesystemError);
+        if (filesystemError)
+        {
+            error = "unable to remove stale REWIRE spool backup: " + filesystemError.message();
+            return false;
+        }
+    }
+
+    filesystemError.clear();
+    std::filesystem::remove(temporaryPath, filesystemError);
+    if (filesystemError)
+    {
+        error = "unable to remove stale REWIRE spool temporary file: " + filesystemError.message();
         return false;
     }
 
