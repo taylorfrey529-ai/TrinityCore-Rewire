@@ -11,6 +11,9 @@
 
 #include "Log.h"
 
+#include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
+
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/context.hpp>
@@ -194,7 +197,7 @@ bool FirestoreTransport::DeliverBatch(std::string& error)
     return true;
 }
 
-bool FirestoreTransport::SendCommit(std::string const& body, std::string& error) const
+bool FirestoreTransport::SendCommit(std::string const& body, std::string& error)
 {
     std::string const token = ReadAccessToken(error);
     if (token.empty())
@@ -250,6 +253,13 @@ bool FirestoreTransport::SendCommit(std::string const& body, std::string& error)
             shutdownError.clear();
 
         unsigned const status = response.result_int();
+        if (status == 401)
+        {
+            std::lock_guard tokenLock(_tokenMutex);
+            _cachedAccessToken.clear();
+            _accessTokenExpiry = {};
+        }
+
         if (status < 200 || status >= 300)
         {
             std::ostringstream message;
@@ -270,16 +280,111 @@ bool FirestoreTransport::SendCommit(std::string const& body, std::string& error)
     }
 }
 
-std::string FirestoreTransport::ReadAccessToken(std::string& error) const
+std::string FirestoreTransport::ReadAccessToken(std::string& error)
 {
-    char const* token = std::getenv(_config.Transport.AccessTokenEnvironment.c_str());
-    if (!token || !*token)
+    if (char const* token = std::getenv(_config.Transport.AccessTokenEnvironment.c_str()); token && *token)
     {
-        error = "missing access token environment variable '" + _config.Transport.AccessTokenEnvironment + "'";
+        error.clear();
+        return token;
+    }
+
+    std::lock_guard lock(_tokenMutex);
+    auto const now = std::chrono::steady_clock::now();
+    if (!_cachedAccessToken.empty() && now < _accessTokenExpiry)
+    {
+        error.clear();
+        return _cachedAccessToken;
+    }
+
+    std::uint32_t expiresInSeconds = 0;
+    std::string token = ReadMetadataAccessToken(expiresInSeconds, error);
+    if (token.empty())
+    {
+        error = "missing access token environment variable '" + _config.Transport.AccessTokenEnvironment +
+            "' and metadata-server acquisition failed: " + error;
         return {};
     }
 
+    std::uint32_t const refreshWindow = expiresInSeconds > 60 ? expiresInSeconds - 60 : expiresInSeconds;
+    _cachedAccessToken = std::move(token);
+    _accessTokenExpiry = now + std::chrono::seconds(refreshWindow);
     error.clear();
-    return token;
+    return _cachedAccessToken;
+}
+
+std::string FirestoreTransport::ReadMetadataAccessToken(std::uint32_t& expiresInSeconds, std::string& error) const
+{
+    namespace asio = boost::asio;
+    namespace beast = boost::beast;
+    namespace http = beast::http;
+    using tcp = asio::ip::tcp;
+
+    try
+    {
+        asio::io_context ioContext;
+        tcp::resolver resolver(ioContext);
+        beast::tcp_stream stream(ioContext);
+
+        auto const endpoints = resolver.resolve(_config.Transport.MetadataHost, _config.Transport.MetadataPort);
+        stream.expires_after(std::chrono::milliseconds(_config.Transport.RequestTimeoutMs));
+        stream.connect(endpoints);
+
+        http::request<http::empty_body> request(http::verb::get,
+            "/computeMetadata/v1/instance/service-accounts/default/token", 11);
+        request.set(http::field::host, _config.Transport.MetadataHost);
+        request.set(http::field::user_agent, "TrinityCore-Rewire/2");
+        request.set("Metadata-Flavor", "Google");
+
+        http::write(stream, request);
+
+        beast::flat_buffer responseBuffer;
+        http::response<http::string_body> response;
+        http::read(stream, responseBuffer, response);
+
+        boost::system::error_code shutdownError;
+        stream.socket().shutdown(tcp::socket::shutdown_both, shutdownError);
+
+        unsigned const status = response.result_int();
+        if (status < 200 || status >= 300)
+        {
+            std::ostringstream message;
+            message << "metadata token request returned HTTP " << status;
+            if (!response.body().empty())
+                message << ": " << response.body();
+            error = message.str();
+            return {};
+        }
+
+        rapidjson::Document document;
+        document.Parse(response.body().data(), response.body().size());
+        if (document.HasParseError() || !document.IsObject())
+        {
+            std::ostringstream message;
+            message << "invalid metadata token JSON";
+            if (document.HasParseError())
+                message << " at offset " << document.GetErrorOffset() << ": "
+                        << rapidjson::GetParseError_En(document.GetParseError());
+            error = message.str();
+            return {};
+        }
+
+        auto token = document.FindMember("access_token");
+        auto expires = document.FindMember("expires_in");
+        if (token == document.MemberEnd() || !token->value.IsString() ||
+            expires == document.MemberEnd() || !expires->value.IsUint())
+        {
+            error = "metadata token response must contain string access_token and unsigned expires_in";
+            return {};
+        }
+
+        expiresInSeconds = expires->value.GetUint();
+        error.clear();
+        return std::string(token->value.GetString(), token->value.GetStringLength());
+    }
+    catch (std::exception const& exception)
+    {
+        error = std::string("metadata token request failed: ") + exception.what();
+        return {};
+    }
 }
 }
