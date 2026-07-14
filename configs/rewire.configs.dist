@@ -31,6 +31,7 @@
     "firestorePort": "443",
     "accessTokenEnvironment": "REWIRE_FIREBASE_ACCESS_TOKEN",
     "metadataHost": "metadata.google.internal",
-    "metadataPort": "80"
+    "metadataPort": "80",
+    "deadLetterPath": "rewire-spool/dead-letter.ndjson"
   }
 }

@@ -13,11 +13,13 @@
 #include "RewireConfig.h"
 #include "RewireQueue.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace Trinity::Rewire
 {
@@ -37,16 +39,28 @@ public:
     void Notify();
 
 private:
+    enum class DeliveryResult : std::uint8_t
+    {
+        Success,
+        RetryableFailure,
+        PermanentFailure
+    };
+
     void Run();
     bool DeliverBatch(std::string& error);
-    bool SendCommit(std::string const& body, std::string& error) const;
-    std::string ReadAccessToken(std::string& error) const;
+    DeliveryResult SendCommit(std::string const& body, unsigned& status, std::string& responseBody, std::string& error);
+    bool WriteDeadLetter(std::vector<std::string> const& batch, unsigned status, std::string const& responseBody, std::string& error) const;
+    std::string ReadAccessToken(std::string& error);
+    std::string ReadMetadataAccessToken(std::uint32_t& expiresInSeconds, std::string& error) const;
 
     RewireConfig _config;
     PersistentQueue& _queue;
     std::thread _worker;
     std::mutex _mutex;
     std::condition_variable _condition;
+    std::mutex _tokenMutex;
+    std::string _cachedAccessToken;
+    std::chrono::steady_clock::time_point _accessTokenExpiry;
     bool _running = false;
     bool _wakeRequested = false;
     std::uint32_t _retryDelayMs = 0;

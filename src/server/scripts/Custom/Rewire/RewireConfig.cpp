@@ -179,6 +179,12 @@ bool Validate(RewireConfig const& config, std::string& error)
         return false;
     }
 
+    if (config.Transport.DeadLetterPath.empty())
+    {
+        error = "transport.deadLetterPath must not be empty";
+        return false;
+    }
+
     return true;
 }
 }
@@ -274,6 +280,7 @@ bool RewireConfigLoader::Load(std::filesystem::path const& path, RewireConfig& c
 
     if (rapidjson::Value const* transport = ReadObject(document, "transport", error))
     {
+        std::string deadLetterPath = parsed.Transport.DeadLetterPath.generic_string();
         if (!ReadBool(*transport, "enabled", parsed.Transport.Enabled, error) ||
             !ReadUnsigned(*transport, "batchSize", parsed.Transport.BatchSize, error) ||
             !ReadUnsigned(*transport, "requestTimeoutMs", parsed.Transport.RequestTimeoutMs, error) ||
@@ -283,8 +290,10 @@ bool RewireConfigLoader::Load(std::filesystem::path const& path, RewireConfig& c
             !ReadString(*transport, "firestorePort", parsed.Transport.FirestorePort, error) ||
             !ReadString(*transport, "accessTokenEnvironment", parsed.Transport.AccessTokenEnvironment, error) ||
             !ReadString(*transport, "metadataHost", parsed.Transport.MetadataHost, error) ||
-            !ReadString(*transport, "metadataPort", parsed.Transport.MetadataPort, error))
+            !ReadString(*transport, "metadataPort", parsed.Transport.MetadataPort, error) ||
+            !ReadString(*transport, "deadLetterPath", deadLetterPath, error))
             return false;
+        parsed.Transport.DeadLetterPath = std::move(deadLetterPath);
     }
     else if (!error.empty())
         return false;
