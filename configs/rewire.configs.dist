@@ -20,5 +20,17 @@
   "conversion": {
     "sourceSchema": "trinitycore.rewire.state.v1",
     "targetSchema": "firestore.document.v1"
+  },
+  "transport": {
+    "enabled": false,
+    "batchSize": 20,
+    "requestTimeoutMs": 10000,
+    "initialRetryMs": 1000,
+    "maxRetryMs": 60000,
+    "firestoreHost": "firestore.googleapis.com",
+    "firestorePort": "443",
+    "accessTokenEnvironment": "REWIRE_FIREBASE_ACCESS_TOKEN",
+    "metadataHost": "metadata.google.internal",
+    "metadataPort": "80"
   }
 }
