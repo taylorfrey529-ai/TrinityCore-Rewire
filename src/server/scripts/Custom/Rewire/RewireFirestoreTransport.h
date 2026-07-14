@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace Trinity::Rewire
 {
@@ -38,9 +39,17 @@ public:
     void Notify();
 
 private:
+    enum class DeliveryResult : std::uint8_t
+    {
+        Success,
+        RetryableFailure,
+        PermanentFailure
+    };
+
     void Run();
     bool DeliverBatch(std::string& error);
-    bool SendCommit(std::string const& body, std::string& error);
+    DeliveryResult SendCommit(std::string const& body, unsigned& status, std::string& responseBody, std::string& error);
+    bool WriteDeadLetter(std::vector<std::string> const& batch, unsigned status, std::string const& responseBody, std::string& error) const;
     std::string ReadAccessToken(std::string& error);
     std::string ReadMetadataAccessToken(std::uint32_t& expiresInSeconds, std::string& error) const;
 
