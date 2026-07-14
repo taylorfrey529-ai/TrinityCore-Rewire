@@ -9,6 +9,7 @@
 
 #include "RewireConfig.h"
 #include "RewireFirestoreConverter.h"
+#include "RewireFirestoreTransport.h"
 #include "RewireQueue.h"
 
 #include "Log.h"
@@ -23,6 +24,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace Trinity::Rewire
 {
@@ -70,6 +72,16 @@ public:
             return;
         }
 
+        if (_config.Transport.Enabled)
+        {
+            _transport = std::make_unique<FirestoreTransport>(_config, *_queue);
+            if (!_transport->Start(error))
+            {
+                TC_LOG_ERROR("server.rewire", "REWIRE transport disabled: {}", error);
+                _transport.reset();
+            }
+        }
+
         _flushCountdownMs = _config.Queue.FlushIntervalMs;
         TC_LOG_INFO("server.rewire", "REWIRE enabled for Firebase project '{}' using collection '{}' and spool '{}'",
             _config.Firebase.ProjectId, _config.Firebase.Collection, _config.Queue.SpoolPath.generic_string());
@@ -92,6 +104,12 @@ public:
 
     void Stop()
     {
+        if (_transport)
+        {
+            _transport->Stop();
+            _transport.reset();
+        }
+
         Flush();
         _queue.reset();
         _enabled = false;
@@ -150,6 +168,9 @@ public:
 
         if (flushAfter)
             Flush();
+
+        if (_transport)
+            _transport->Notify();
     }
 
 private:
@@ -160,11 +181,18 @@ private:
 
         std::string error;
         if (!_queue->Flush(error))
+        {
             TC_LOG_ERROR("server.rewire", "REWIRE queue flush failed: {}", error);
+            return;
+        }
+
+        if (_transport)
+            _transport->Notify();
     }
 
     RewireConfig _config;
     std::unique_ptr<PersistentQueue> _queue;
+    std::unique_ptr<FirestoreTransport> _transport;
     std::uint32_t _flushCountdownMs = 0;
     bool _enabled = false;
 };
